@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}用户管理{% endblock %}
+{% block heading %}用户管理{% endblock %}
+{% block sub %}{% if is_admin %}管理账号：添加、删除、重置密码、调整权限{% else %}修改自己的账号密码{% endif %}{% endblock %}
+
+{% block content %}
+<div class="card">
+  <h2>{% if is_admin %}账号列表{% else %}我的账号{% endif %}</h2>
+  {% if is_admin %}
+  <table>
+    <thead><tr><th>用户名</th><th>角色</th><th>最近登录</th><th>重置密码</th><th>角色调整</th><th></th></tr></thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td><strong>{{ u.username }}</strong>{% if u.username == user %}<span class="muted">（当前）</span>{% endif %}</td>
+        <td>
+          {% if u.role == "admin" %}<span class="pill ok"><span class="dot"></span>管理员</span>
+          {% else %}<span class="pill"><span class="dot"></span>只读</span>{% endif %}
+        </td>
+        <td class="mono">{{ u.last_login.strftime("%Y-%m-%d %H:%M:%S") if u.last_login else "-" }}</td>
+        <td>
+          <form method="post" action="/users/password" style="display:flex;gap:6px">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="username" value="{{ u.username }}">
+            <input type="password" name="password" placeholder="新密码（≥8 位）" style="min-width:150px">
+            <button class="small" type="submit">重置</button>
+          </form>
+        </td>
+        <td>
+          <form method="post" action="/users/role" style="display:flex;gap:6px" onsubmit="return confirm('修改 {{ u.username }} 的角色？（重新登录后生效）')">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="username" value="{{ u.username }}">
+            <select name="role" style="min-width:110px">
+              <option value="admin" {% if u.role == "admin" %}selected{% endif %}>管理员</option>
+              <option value="viewer" {% if u.role != "admin" %}selected{% endif %}>只读</option>
+            </select>
+            <button class="small" type="submit">保存</button>
+          </form>
+        </td>
+        <td class="actions">
+          <form method="post" action="/users/delete" onsubmit="return confirm('删除账号 {{ u.username }}？')">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="username" value="{{ u.username }}">
+            <button class="danger small" type="submit">删除</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <table>
+    <thead><tr><th>用户名</th><th>角色</th><th>最近登录</th><th>修改密码</th></tr></thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td><strong>{{ u.username }}</strong></td>
+        <td><span class="pill"><span class="dot"></span>只读</span></td>
+        <td class="mono">{{ u.last_login.strftime("%Y-%m-%d %H:%M:%S") if u.last_login else "-" }}</td>
+        <td>
+          <form method="post" action="/users/password" style="display:flex;gap:6px">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="username" value="{{ u.username }}">
+            <input type="password" name="password" placeholder="新密码（≥8 位）" style="min-width:150px">
+            <button class="small" type="submit">保存</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+{% if is_admin %}
+<div class="card">
+  <h2>添加账号</h2>
+  <form method="post" action="/users/add">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid three">
+      <div class="field"><label>用户名</label><input type="text" name="username" placeholder="例如 monitor"></div>
+      <div class="field"><label>初始密码（至少 8 位）</label><input type="password" name="password" autocomplete="new-password"></div>
+      <div class="field">
+        <label>角色</label>
+        <select name="role">
+          <option value="viewer">只读（仅查看）</option>
+          <option value="admin">管理员（可修改）</option>
+        </select>
+      </div>
+    </div>
+    <button class="primary" type="submit">创建账号</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · SVC Admin</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="login-wrap">
+  <form class="login-card" method="post" action="/login">
+    <h1>SVC Admin</h1>
+    <p class="hint">FTP · DNS 代理 · RADIUS · Syslog · SNMP</p>
+    {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    <div class="field">
+      <label for="username">用户名</label>
+      <input id="username" type="text" name="username" autofocus autocomplete="username">
+    </div>
+    <div class="field">
+      <label for="password">密码</label>
+      <input id="password" type="password" name="password" autocomplete="current-password">
+    </div>
+    <button class="primary" type="submit">登录</button>
+  </form>
+</div>
+</body>
+</html>

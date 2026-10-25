@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}NTP{% endblock %}
+{% block heading %}NTP 服务{% endblock %}
+{% block sub %}chrony · UDP 123 · 同步上游并为内网提供授时{% endblock %}
+{% block actions %}
+  {% if state.active %}<span class="pill ok"><span class="dot"></span>运行中</span>
+  {% else %}<span class="pill err"><span class="dot"></span>{{ state.state }}</span>{% endif %}
+{% endblock %}
+
+{% block content %}
+{% if tracking.local_clock %}
+<div class="flash info">正在使用本地时钟对外授时，尚未与上游完成同步（首次启动通常需要几分钟，chrony 会持续尝试）。</div>
+{% elif not tracking.synced %}
+<div class="flash err">时间同步异常：{{ tracking.leap_status or "未知" }}。</div>
+{% endif %}
+
+<div class="card">
+  <h2>同步状态</h2>
+  <table>
+    <tbody>
+      <tr><th>当前时间</th><td class="mono">{{ panel_time }}</td></tr>
+      <tr>
+        <th>同步状态</th>
+        <td>
+          {% if tracking.local_clock %}<span class="pill"><span class="dot"></span>本地时钟</span>
+          {% elif tracking.synced %}<span class="pill ok"><span class="dot"></span>已同步</span>
+          {% else %}<span class="pill err"><span class="dot"></span>未同步</span>{% endif %}
+        </td>
+      </tr>
+      <tr><th>Stratum</th><td>{{ tracking.stratum or "-" }}</td></tr>
+      <tr><th>参考源</th><td class="mono">{{ tracking.reference_id or "-" }}</td></tr>
+      <tr><th>系统偏差</th><td class="mono">{{ tracking.system_time or "-" }}</td></tr>
+      <tr><th>最近偏移</th><td class="mono">{{ tracking.last_offset or "-" }}</td></tr>
+      <tr><th>Leap 状态</th><td>{{ tracking.leap_status or "-" }}</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>时间源</h2>
+  <p class="hint">^* 已选中 · ^+ 可用备选 · ^? 尚未可达</p>
+  {% if sources %}
+  <table>
+    <thead><tr><th>状态</th><th>服务器</th><th class="right">Stratum</th><th class="right">Reach</th><th>最近样本 / 误差</th></tr></thead>
+    <tbody>
+      {% for s in sources %}
+      <tr>
+        <td class="mono">{{ s.mode }}</td>
+        <td class="mono">{{ s.address }}</td>
+        <td class="right">{{ s.stratum }}</td>
+        <td class="right">{{ s.reach }}</td>
+        <td class="mono">{{ s.detail }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">没有可用的时间源，请检查上游服务器配置和网络连通性。</p>
+  {% endif %}
+</div>
+
+{% if is_admin %}
+<div class="card">
+  <h2>设置</h2>
+  <form method="post" action="/ntp/settings">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid two">
+      <div class="field">
+        <label>上游 NTP 服务器（每行一个，域名或 IP）</label>
+        <textarea name="servers">{% for s in cfg.servers %}{{ s }}
+{% endfor %}</textarea>
+      </div>
+      <div class="field">
+        <label>允许授时的网段（每行一个 CIDR，留空则只作为客户端）</label>
+        <textarea name="allow_networks">{% for n in cfg.allow_networks %}{{ n }}
+{% endfor %}</textarea>
+      </div>
+    </div>
+    <div class="grid three">
+      <div class="field">
+        <label>本地层级（0 表示不提供本地参考，通常用 10）</label>
+        <input type="number" name="local_stratum" value="{{ cfg.local_stratum }}" min="0" max="15">
+      </div>
+      <label class="check" style="margin-top:24px"><input type="checkbox" name="enabled" {% if cfg.enabled %}checked{% endif %}> 启用服务</label>
+      <div class="field"></div>
+    </div>
+    <button class="primary" type="submit">保存并应用</button>
+  </form>
+</div>
+{% else %}
+<div class="card">
+  <h2>设置（只读）</h2>
+  <table>
+    <tbody>
+      <tr><th>上游服务器</th><td class="mono">{{ cfg.servers | join(", ") or "-" }}</td></tr>
+      <tr><th>允许授时网段</th><td class="mono">{{ cfg.allow_networks | join(", ") or "仅作为客户端" }}</td></tr>
+      <tr><th>本地层级</th><td>{{ cfg.local_stratum }}</td></tr>
+      <tr><th>服务</th><td>{{ "启用" if cfg.enabled else "停用" }}</td></tr>
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>使用说明</h2>
+  <ul style="margin:0;padding-left:18px;color:var(--muted);font-size:13px;line-height:1.9">
+    <li>本机使用 chrony 取代 systemd-timesyncd，配置文件为 <span class="mono">/etc/chrony/chrony.conf</span>（由面板生成）。</li>
+    <li>只有配置了「允许授时网段」后才会监听 UDP 123 对外服务，否则仅作为客户端使用。</li>
+    <li>内网设备把 NTP 服务器指向本机地址即可，例如 Windows：<span class="mono">w32tm /config /manualpeerlist:10.10.10.1 /syncfromflags:manual /update</span>。</li>
+    <li>客户端数量较多时建议在网关或交换机上做 NTP 代理，避免单机承载过大。</li>
+  </ul>
+</div>
+{% endblock %}

@@ -1,0 +1,268 @@
+#!/usr/bin/python3
+"""SVC Admin 配置落地助手。
+
+由 svcadmin 用户通过 sudo 调用，只接受白名单服务名：
+    svcadmin-apply <service>
+
+读取 /var/lib/svcadmin/staging/<service>/manifest.json，
+依次执行：备份 → 原子安装 → 配置校验 → 重启 → 健康检查，
+任一步失败则回滚到旧配置并重新启动服务。结果以 JSON 输出到 stdout。
+"""
+
+import json
+import os
+import pwd
+import re
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+STAGING = Path("/var/lib/svcadmin/staging")
+BACKUP = Path("/var/lib/svcadmin/backups")
+SERVICES = {
+    "dns": ["/etc/dnsmasq.d/"],
+    "ftp": ["/etc/pure-ftpd/"],
+    "syslog": ["/etc/rsyslog.d/"],
+    "snmp": ["/etc/snmp/"],
+    "ntp": ["/etc/chrony/"],
+    "radius": [],
+}
+PRE_RESTART = {"snmp": [["rm", "-f", "/var/lib/snmp/snmpd.conf"]]}
+# 某些服务受 AppArmor 限制，只能读取自身配置目录（如 chronyd），校验副本放到这里
+PROBE_PATHS = {"ntp": "/etc/chrony/.svcadmin-validate.conf"}
+FTP_ROOT = "/srv/ftp"
+FTP_UID = int(os.environ.get("SVCADMIN_FTP_UID", "2001"))
+FTP_GID = int(os.environ.get("SVCADMIN_FTP_GID", "2001"))
+NAME_RE = re.compile(r"^[a-z0-9_][a-z0-9_-]{0,31}$")
+MAX_BYTES = 512 * 1024
+
+
+SERVICE = None
+
+
+def restore_stage_owner():
+    """把 staging 目录交还给面板用户，避免 root 执行后遗留不可写文件。"""
+    if not SERVICE:
+        return
+    try:
+        entry = pwd.getpwnam("svcadmin")
+        stage = STAGING / SERVICE
+        if not stage.exists():
+            return
+        for root, _dirs, files in os.walk(stage):
+            os.chown(root, entry.pw_uid, entry.pw_gid)
+            for name in files:
+                os.chown(os.path.join(root, name), entry.pw_uid, entry.pw_gid)
+    except Exception:
+        pass
+
+
+def emit(ok, messages):
+    restore_stage_owner()
+    print(json.dumps({"ok": bool(ok), "messages": [str(m) for m in messages]}, ensure_ascii=False))
+    sys.exit(0)
+
+
+def run(args, timeout=120):
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return proc.returncode, (proc.stdout + proc.stderr).strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, str(exc)
+
+
+def port_listening(port, proto="tcp"):
+    if proto == "udp":
+        code, output = run(["ss", "-H", "-lun", f"sport = :{port}"], timeout=10)
+        return bool(output.strip())
+    code, output = run(["ss", "-H", "-ltn", f"sport = :{port}"], timeout=10)
+    if output.strip():
+        return True
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.5)
+    try:
+        sock.connect(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def check_manifest(service, manifest):
+    if service not in SERVICES:
+        raise ValueError(f"不允许的服务：{service}")
+    files = manifest.get("files") or []
+    if not isinstance(files, list):
+        raise ValueError("files 字段非法")
+    allowed = SERVICES[service]
+    for item in files:
+        dest = str(item.get("dest", ""))
+        src = str(item.get("src", ""))
+        if not dest.startswith("/") or ".." in dest.split("/"):
+            raise ValueError(f"非法目标路径：{dest}")
+        if not any(dest.startswith(prefix) for prefix in allowed):
+            raise ValueError(f"{service} 不允许写入 {dest}")
+        if not src or "/" in src or src.startswith("."):
+            raise ValueError(f"非法源文件名：{src}")
+        source = STAGING / service / src
+        info = source.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"源文件必须是普通文件：{src}")
+        if info.st_size > MAX_BYTES:
+            raise ValueError(f"源文件过大：{src}")
+    return files
+
+
+def install_file(item):
+    source = STAGING / SERVICE / item["src"]
+    dest = Path(item["dest"])
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.parent / (dest.name + ".svcadmin-tmp")
+    shutil.copyfile(source, tmp)
+    mode = int(str(item.get("mode", "0644")), 8)
+    os.chmod(tmp, mode)
+    owner = str(item.get("owner", "root:root"))
+    user, _, group = owner.partition(":")
+    try:
+        uid = pwd.getpwnam(user).pw_uid if user and not user.isdigit() else int(user or 0)
+        gid = int(group) if group.isdigit() else pwd.getpwnam(user).pw_gid if user else 0
+        os.chown(tmp, uid, gid)
+    except (KeyError, ValueError):
+        pass
+    os.replace(tmp, dest)
+
+
+def ensure_ftp_home(name):
+    if not NAME_RE.match(name):
+        return
+    path = Path(FTP_ROOT) / name
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o750)
+    os.chown(path, FTP_UID, FTP_GID)
+
+
+def as_commands(value):
+    if not value:
+        return []
+    if isinstance(value[0], str):
+        return [value]
+    return value
+
+
+def main():
+    if os.geteuid() != 0:
+        emit(False, ["必须以 root 运行"])
+    if len(sys.argv) != 2:
+        emit(False, ["用法：svcadmin-apply <service>"])
+    global SERVICE
+    SERVICE = sys.argv[1]
+    if SERVICE not in SERVICES:
+        emit(False, [f"不允许的服务：{SERVICE}"])
+
+    manifest_path = STAGING / SERVICE / "manifest.json"
+    if not manifest_path.is_file():
+        emit(False, [f"找不到 manifest：{manifest_path}"])
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        files = check_manifest(SERVICE, manifest)
+    except Exception as exc:
+        emit(False, [f"manifest 校验失败：{exc}"])
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup_dir = BACKUP / SERVICE / stamp
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    existed = {}
+    for item in files:
+        dest = Path(item["dest"])
+        existed[str(dest)] = dest.exists()
+        if dest.exists():
+            shutil.copy2(dest, backup_dir / dest.name)
+
+    messages = []
+    try:
+        for action in manifest.get("actions") or []:
+            kind, _, value = str(action).partition(":")
+            if kind == "ftp_home":
+                ensure_ftp_home(value)
+        for item in files:
+            install_file(item)
+        messages.append(f"已安装 {len(files)} 个文件")
+    except Exception as exc:
+        emit(False, messages + [f"写入配置失败：{exc}"])
+
+    def rollback(reason):
+        for dest_str, present in existed.items():
+            dest = Path(dest_str)
+            saved = backup_dir / dest.name
+            if present and saved.exists():
+                shutil.copy2(saved, dest)
+            elif not present and dest.exists():
+                dest.unlink()
+        if manifest.get("restart"):
+            run(manifest["restart"], timeout=120)
+        emit(False, messages + [reason, "已回滚到之前的配置"])
+
+    for command in PRE_RESTART.get(SERVICE, []):
+        run(command, timeout=30)
+
+    for command in as_commands(manifest.get("validate")):
+        staged = STAGING / SERVICE / (files[0]["src"] if files else "")
+        args_text = [str(part) for part in command]
+        cleanup = None
+        if any("{staged}" in part for part in args_text):
+            probe = Path(PROBE_PATHS.get(SERVICE) or f"/run/svcadmin-validate-{SERVICE}")
+            try:
+                shutil.copyfile(staged, probe)
+                os.chmod(probe, 0o644)
+                staged = probe
+                if SERVICE in PROBE_PATHS:
+                    cleanup = probe
+            except OSError:
+                pass
+        args = [part.replace("{staged}", str(staged)) for part in args_text]
+        code, output = run(args)
+        if cleanup is not None:
+            try:
+                cleanup.unlink()
+            except OSError:
+                pass
+        if code != 0:
+            rollback(f"配置校验失败：{' '.join(args)} → {output[-800:]}")
+
+    if manifest.get("restart"):
+        code, output = run(manifest["restart"], timeout=180)
+        if code != 0:
+            rollback(f"重启失败：{output[-800:]}")
+        messages.append("服务已重启")
+
+    for command in as_commands(manifest.get("health")):
+        code, output = run(command, timeout=30)
+        if code != 0:
+            rollback(f"健康检查失败：{output[-500:] or 'service not active'}")
+
+    for entry in manifest.get("health_ports") or []:
+        text = str(entry)
+        if text.endswith("/udp"):
+            port, proto = int(text.split("/")[0]), "udp"
+        else:
+            port, proto = int(text), "tcp"
+        ok = False
+        for _ in range(10):
+            if port_listening(port, proto):
+                ok = True
+                break
+            time.sleep(0.5)
+        if not ok:
+            rollback(f"端口 {port}/{proto} 未监听")
+
+    messages.append("健康检查通过")
+    emit(True, messages)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}没有权限{% endblock %}
+{% block heading %}没有权限{% endblock %}
+{% block sub %}当前账号为只读角色{% endblock %}
+
+{% block content %}
+<div class="card">
+  <p>该操作需要管理员权限。如需修改配置，请联系管理员调整你的角色。</p>
+  <p><a class="btn" href="/">返回总览</a></p>
+</div>
+{% endblock %}

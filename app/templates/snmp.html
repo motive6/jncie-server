@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block title %}SNMP{% endblock %}
+{% block heading %}SNMP 服务{% endblock %}
+{% block sub %}本机 snmpd 配置 · 通过 SNMP 监控其它主机{% endblock %}
+{% block actions %}
+  {% if state.active %}<span class="pill ok"><span class="dot"></span>运行中</span>
+  {% else %}<span class="pill err"><span class="dot"></span>{{ state.state }}</span>{% endif %}
+{% endblock %}
+
+{% block content %}
+{% if is_admin %}
+<div class="card">
+  <h2>本机 snmpd 配置</h2>
+  <form method="post" action="/snmp/settings">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid three">
+      <div class="field"><label>v2c 团体名</label><input type="text" name="community" value="{{ cfg.community }}"></div>
+      <div class="field"><label>sysLocation</label><input type="text" name="sys_location" value="{{ cfg.sys_location }}"></div>
+      <div class="field"><label>sysContact</label><input type="text" name="sys_contact" value="{{ cfg.sys_contact }}"></div>
+    </div>
+    <div class="grid two">
+      <div class="field">
+        <label>允许来源（每行一个网段，v2c 用）</label>
+        <textarea name="allowed_networks">{% for n in cfg.allowed_networks %}{{ n }}
+{% endfor %}</textarea>
+      </div>
+      <div class="field">
+        <label>Trap 目标（每行 <span class="mono">主机=团体名</span>）</label>
+        <textarea name="traps">{% for t in cfg.traps %}{{ t.host }}={{ t.community }}
+{% endfor %}</textarea>
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" name="enabled" {% if cfg.enabled %}checked{% endif %}> 启用服务</label>
+    <div style="margin-top:14px"><button class="primary" type="submit">保存并应用</button></div>
+  </form>
+</div>
+{% else %}
+<div class="card">
+  <h2>本机 snmpd 配置（只读）</h2>
+  <table>
+    <tbody>
+      <tr><th>sysLocation</th><td>{{ cfg.sys_location }}</td></tr>
+      <tr><th>sysContact</th><td>{{ cfg.sys_contact }}</td></tr>
+      <tr><th>允许来源</th><td class="mono">{{ cfg.allowed_networks | join(", ") }}</td></tr>
+      <tr><th>v2c 团体名</th><td class="mono">已配置（不显示）</td></tr>
+      <tr><th>Trap 目标</th><td>{{ cfg.traps | length }} 个</td></tr>
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>监控主机</h2>
+  <p class="hint">面板每 60 秒探测一次，也可手动触发；展示 sysName / 运行时长 / 位置</p>
+  <table>
+    <thead>
+      <tr>
+        <th>名称</th><th>地址</th><th>版本</th><th>状态</th>
+        <th>sysName</th><th>运行时长</th><th>位置</th><th>最近探测</th>
+        {% if is_admin %}<th></th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for h in hosts %}
+      <tr>
+        <td><a href="/snmp/host/{{ h.id }}"><strong>{{ h.name }}</strong></a>{% if not h.enabled %} <span class="muted">(已停用)</span>{% endif %}</td>
+        <td class="mono">{{ h.address }}</td>
+        <td>{{ h.version }}</td>
+        <td>
+          {% if h.last_ok %}<span class="pill ok"><span class="dot"></span>在线</span>
+          {% else %}<span class="pill err"><span class="dot"></span>离线</span>{% endif %}
+        </td>
+        <td>{{ h.sys_name or "-" }}</td>
+        <td>{{ h.sys_uptime or "-" }}</td>
+        <td>{{ h.sys_location or "-" }}</td>
+        <td class="mono">
+          {{ h.last_polled.strftime("%m-%d %H:%M:%S") if h.last_polled else "-" }}
+          {% if h.last_error %}<div class="muted">{{ h.last_error }}</div>{% endif %}
+        </td>
+        {% if is_admin %}
+        <td class="actions">
+          <a class="btn small" href="/snmp?edit={{ h.id }}">编辑</a>
+          <form method="post" action="/snmp/hosts/poll">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="id" value="{{ h.id }}">
+            <button class="small" type="submit">探测</button>
+          </form>
+          <form method="post" action="/snmp/hosts/delete" onsubmit="return confirm('删除监控主机 {{ h.name }}？')">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="id" value="{{ h.id }}">
+            <button class="danger small" type="submit">删除</button>
+          </form>
+        </td>
+        {% endif %}
+      </tr>
+      {% else %}
+      <tr><td colspan="{{ 9 if is_admin else 8 }}" class="empty">还没有监控主机</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if is_admin %}
+  <hr class="div">
+  <h2 style="margin-bottom:10px">{% if edit_host %}编辑主机：{{ edit_host.name }}{% else %}添加监控主机{% endif %}</h2>
+  <form method="post" action="/snmp/hosts">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="id" value="{{ edit_host.id if edit_host else 0 }}">
+    <div class="grid three">
+      <div class="field"><label>名称</label><input type="text" name="name" value="{{ edit_host.name if edit_host else '' }}" placeholder="例如 core-switch"></div>
+      <div class="field"><label>地址</label><input type="text" name="address" value="{{ edit_host.address if edit_host else '' }}" placeholder="10.10.10.254"></div>
+      <div class="field">
+        <label>SNMP 版本</label>
+        <select name="version">
+          <option value="2c" {% if not edit_host or edit_host.version == "2c" %}selected{% endif %}>v2c</option>
+          <option value="3" {% if edit_host and edit_host.version == "3" %}selected{% endif %}>v3</option>
+        </select>
+      </div>
+    </div>
+    <div class="grid two">
+      <div class="field">
+        <label>v2c 团体名</label>
+        <input type="text" name="community" value="{{ edit_host.community if edit_host else '' }}">
+      </div>
+      <div class="field">
+        <label>v3 用户名</label>
+        <input type="text" name="v3_user" value="{{ edit_host.v3_user if edit_host else '' }}">
+      </div>
+    </div>
+    <div class="grid two">
+      <div class="field">
+        <label>v3 认证口令（SHA）{% if edit_host and edit_host.v3_auth %}，留空保持不变{% endif %}</label>
+        <input type="password" name="v3_auth" autocomplete="new-password">
+      </div>
+      <div class="field">
+        <label>v3 加密口令（AES）{% if edit_host and edit_host.v3_priv %}，留空保持不变{% endif %}</label>
+        <input type="password" name="v3_priv" autocomplete="new-password">
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" name="enabled" {% if not edit_host or edit_host.enabled %}checked{% endif %}> 启用轮询</label>
+    <div style="margin-top:14px">
+      <button class="primary" type="submit">保存并立即探测</button>
+      {% if edit_host %}<a class="btn" href="/snmp">取消</a>{% endif %}
+    </div>
+  </form>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>SNMPv3 用户（本机代理）</h2>
+  <p class="hint">供其它网管系统读取本机；认证 SHA + 加密 AES</p>
+  <table>
+    <thead><tr><th>用户名</th><th>安全级别</th>{% if is_admin %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+      {% for u in cfg.v3_users %}
+      <tr>
+        <td class="mono">{{ u.username }}</td>
+        <td>authPriv (SHA / AES)</td>
+        {% if is_admin %}
+        <td class="actions">
+          <form method="post" action="/snmp/v3/delete" onsubmit="return confirm('删除 v3 用户 {{ u.username }}？')">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="username" value="{{ u.username }}">
+            <button class="danger small" type="submit">删除</button>
+          </form>
+        </td>
+        {% endif %}
+      </tr>
+      {% else %}
+      <tr><td colspan="{{ 3 if is_admin else 2 }}" class="empty">还没有 v3 用户</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if is_admin %}
+  <hr class="div">
+  <form method="post" action="/snmp/v3/add">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid three">
+      <div class="field"><label>用户名</label><input type="text" name="username"></div>
+      <div class="field"><label>认证口令 (SHA)</label><input type="password" name="auth_pass"></div>
+      <div class="field"><label>加密口令 (AES)</label><input type="password" name="priv_pass"></div>
+    </div>
+    <button type="submit">添加 / 更新用户</button>
+  </form>
+  {% endif %}
+</div>
+
+{% if is_admin %}
+<div class="card">
+  <h2>本机自测</h2>
+  <p class="hint">用当前 v2c 团体名读取本机 sysDescr（1.3.6.1.2.1.1.1.0）</p>
+  <form method="post" action="/snmp/test">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit">执行 snmpget</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

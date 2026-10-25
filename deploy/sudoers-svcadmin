@@ -1,0 +1,3 @@
+# SVC Admin：仅允许调用固定的配置落地助手（不接受任意命令）
+svcadmin ALL=(root) NOPASSWD: /usr/local/sbin/svcadmin-apply
+svcadmin ALL=(root) NOPASSWD: /usr/local/sbin/svcadmin-net apply, /usr/local/sbin/svcadmin-net confirm, /usr/local/sbin/svcadmin-net pending, /usr/local/sbin/svcadmin-net show

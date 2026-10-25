@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}DNS{% endblock %}
+{% block heading %}DNS 代理{% endblock %}
+{% block sub %}dnsmasq · 上游转发 · 缓存 · 本地解析 · 域名屏蔽{% endblock %}
+{% block actions %}
+  {% if state.active %}<span class="pill ok"><span class="dot"></span>运行中</span>
+  {% else %}<span class="pill err"><span class="dot"></span>{{ state.state }}</span>{% endif %}
+{% endblock %}
+
+{% block content %}
+{% if is_admin %}
+<div class="card">
+  <h2>转发与缓存</h2>
+  <p class="hint">上游留空则不使用系统 DNS；解析请求按顺序尝试</p>
+  <form method="post" action="/dns/settings">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid two">
+      <div class="field">
+        <label>上游 DNS（每行一个）</label>
+        <textarea name="upstreams">{% for u in cfg.upstreams %}{{ u }}
+{% endfor %}</textarea>
+      </div>
+      <div class="field">
+        <label>监听地址（每行一个，留空监听所有网卡）</label>
+        <textarea name="listen_addresses">{% for a in cfg.listen_addresses %}{{ a }}
+{% endfor %}</textarea>
+      </div>
+    </div>
+    <div class="grid three">
+      <div class="field">
+        <label>本地域名后缀</label>
+        <input type="text" name="local_domain" value="{{ cfg.local_domain }}" placeholder="例如 home">
+      </div>
+      <div class="field">
+        <label>缓存条数</label>
+        <input type="number" name="cache_size" value="{{ cfg.cache_size }}">
+      </div>
+      <div class="field" style="display:flex;gap:18px;align-items:flex-end;padding-bottom:4px">
+        <label class="check"><input type="checkbox" name="log_queries" {% if cfg.log_queries %}checked{% endif %}> 记录查询日志</label>
+        <label class="check"><input type="checkbox" name="enabled" {% if cfg.enabled %}checked{% endif %}> 启用服务</label>
+      </div>
+    </div>
+
+    <hr class="div">
+    <div class="grid two">
+      <div class="field">
+        <label>按域名指定上游（格式 <span class="mono">域名=IP[,IP]</span>）</label>
+        <textarea name="domain_forwarders">{% for f in cfg.domain_forwarders %}{{ f.domain }}={{ f.servers | join(",") }}
+{% endfor %}</textarea>
+      </div>
+      <div class="field">
+        <label>域名屏蔽（每行一个，返回 0.0.0.0 与 ::）</label>
+        <textarea name="blocked">{% for d in cfg.blocked %}{{ d }}
+{% endfor %}</textarea>
+      </div>
+    </div>
+    <div class="grid two">
+      <div class="field">
+        <label>本地 A 记录（格式 <span class="mono">主机名=IP</span>）</label>
+        <textarea name="records">{% for r in cfg.records %}{{ r.name }}={{ r.ip }}
+{% endfor %}</textarea>
+      </div>
+      <div class="field">
+        <label>CNAME（格式 <span class="mono">别名=目标</span>）</label>
+        <textarea name="cnames">{% for c in cfg.cnames %}{{ c.name }}={{ c.target }}
+{% endfor %}</textarea>
+      </div>
+    </div>
+    <div style="margin-top:10px"><button class="primary" type="submit">保存并应用</button></div>
+  </form>
+</div>
+{% else %}
+<div class="card">
+  <h2>当前配置（只读）</h2>
+  <table>
+    <tbody>
+      <tr><th>上游 DNS</th><td class="mono">{{ cfg.upstreams | join(", ") or "-" }}</td></tr>
+      <tr><th>监听地址</th><td class="mono">{{ cfg.listen_addresses | join(", ") or "所有网卡" }}</td></tr>
+      <tr><th>本地域名</th><td>{{ cfg.local_domain or "-" }}</td></tr>
+      <tr><th>缓存条数</th><td>{{ cfg.cache_size }}</td></tr>
+      <tr><th>本地 A 记录</th><td class="mono">{% for r in cfg.records %}{{ r.name }}={{ r.ip }}{% if not loop.last %}, {% endif %}{% else %}-{% endfor %}</td></tr>
+      <tr><th>CNAME</th><td class="mono">{% for c in cfg.cnames %}{{ c.name }}={{ c.target }}{% if not loop.last %}, {% endif %}{% else %}-{% endfor %}</td></tr>
+      <tr><th>域名屏蔽</th><td class="mono">{{ cfg.blocked | join(", ") or "-" }}</td></tr>
+      <tr><th>查询日志</th><td>{{ "开启" if cfg.log_queries else "关闭" }}</td></tr>
+      <tr><th>服务</th><td>{{ "启用" if cfg.enabled else "停用" }}</td></tr>
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>解析测试</h2>
+  <form method="get" action="/dns">
+    <div class="grid two">
+      <div class="field"><label>域名</label><input type="text" name="q" value="{{ query }}" placeholder="example.com"></div>
+      <div class="field" style="display:flex;align-items:flex-end;gap:8px">
+        <button type="submit">查询本机 DNS</button>
+        <a class="btn" href="/dns?log=1">查看查询日志</a>
+      </div>
+    </div>
+  </form>
+  {% if result %}<pre class="log">{{ result }}</pre>{% endif %}
+  {% if log_lines %}
+  <p class="hint" style="margin-top:14px">查询日志（最新在前，显示最近 200 行）</p>
+  <pre class="log">{% for line in log_lines %}{{ line }}
+{% endfor %}</pre>
+  {% endif %}
+</div>
+{% endblock %}

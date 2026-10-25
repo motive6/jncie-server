@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}Syslog{% endblock %}
+{% block heading %}Syslog 服务{% endblock %}
+{% block sub %}rsyslog · 远程接收 · 规则过滤 · 日志入库与检索{% endblock %}
+{% block actions %}
+  {% if state.active %}<span class="pill ok"><span class="dot"></span>运行中</span>
+  {% else %}<span class="pill err"><span class="dot"></span>{{ state.state }}</span>{% endif %}
+{% endblock %}
+
+{% block content %}
+{% if dberr %}<div class="flash err">{{ dberr }}</div>{% endif %}
+{% if is_admin %}
+<div class="card">
+  <h2>接收与保留</h2>
+  <p class="hint">当前库内 {{ stats.count }} 条日志{% if stats.oldest %}，最早 {{ stats.oldest }}{% endif %}</p>
+  <form method="post" action="/syslog/settings">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid two">
+      <div class="field">
+        <label>允许的发送网段（每行一个，rsyslog AllowedSender）</label>
+        <textarea name="allowed_networks">{% for n in cfg.allowed_networks %}{{ n }}
+{% endfor %}</textarea>
+      </div>
+      <div class="field">
+        <label>保留天数</label>
+        <input type="number" name="retention_days" value="{{ cfg.retention_days }}">
+        <div style="display:flex;gap:16px;margin-top:14px">
+          <label class="check"><input type="checkbox" name="listen_remote" {% if cfg.listen_remote %}checked{% endif %}> 接收远程日志 (UDP/TCP 514)</label>
+          <label class="check"><input type="checkbox" name="enabled" {% if cfg.enabled %}checked{% endif %}> 启用服务</label>
+        </div>
+      </div>
+    </div>
+    <button class="primary" type="submit">保存并应用</button>
+    <button class="danger" type="submit" formaction="/syslog/prune" onclick="return confirm('按保留天数清理历史日志？')">清理历史日志</button>
+  </form>
+</div>
+{% else %}
+<div class="card">
+  <h2>接收与保留（只读）</h2>
+  <table>
+    <tbody>
+      <tr><th>远程接收</th><td>{{ "开启（UDP/TCP 514）" if cfg.listen_remote else "关闭" }}</td></tr>
+      <tr><th>允许的发送网段</th><td class="mono">{{ cfg.allowed_networks | join(", ") or "-" }}</td></tr>
+      <tr><th>保留天数</th><td>{{ cfg.retention_days }} 天</td></tr>
+      <tr><th>库内日志</th><td>{{ stats.count }} 条{% if stats.oldest %}，最早 {{ stats.oldest }}{% endif %}</td></tr>
+      <tr><th>服务</th><td>{{ "启用" if cfg.enabled else "停用" }}</td></tr>
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>规则</h2>
+  <p class="hint">规则按顺序生效，丢弃规则位于写库之前</p>
+  <table>
+    <thead><tr><th>匹配</th><th>值</th><th>动作</th><th>目标</th>{% if is_admin %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+      {% for r in cfg.rules %}
+      <tr>
+        <td class="mono">{{ r.type }}</td>
+        <td class="mono">{{ r.value }}</td>
+        <td>{{ "丢弃" if r.action == "drop" else "转发" }}</td>
+        <td class="mono">{{ r.target or "-" }}</td>
+        {% if is_admin %}
+        <td class="actions">
+          <form method="post" action="/syslog/rule/delete">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="index" value="{{ loop.index0 }}">
+            <button class="danger small" type="submit">删除</button>
+          </form>
+        </td>
+        {% endif %}
+      </tr>
+      {% else %}
+      <tr><td colspan="{{ 5 if is_admin else 4 }}" class="empty">还没有规则</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if is_admin %}
+  <hr class="div">
+  <form method="post" action="/syslog/rule/add">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid three">
+      <div class="field">
+        <label>匹配类型</label>
+        <select name="type">
+          <option value="program">程序名</option>
+          <option value="facility">设施</option>
+          <option value="msg">消息内容</option>
+        </select>
+      </div>
+      <div class="field"><label>匹配值</label><input type="text" name="value" placeholder="例如 noisy-daemon"></div>
+      <div class="field">
+        <label>动作</label>
+        <select name="action">
+          <option value="drop">丢弃</option>
+          <option value="forward">转发</option>
+        </select>
+      </div>
+    </div>
+    <div class="field"><label>转发目标（仅转发时填写，<span class="mono">IP:端口</span>）</label><input type="text" name="target" placeholder="10.10.10.10:514"></div>
+    <button type="submit">添加规则</button>
+  </form>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>日志检索</h2>
+  <form method="get" action="/syslog">
+    <div class="grid three">
+      <div class="field"><label>关键字</label><input type="text" name="q" value="{{ q }}"></div>
+      <div class="field"><label>主机</label><input type="text" name="host" value="{{ host }}"></div>
+      <div class="field"><label>程序</label><input type="text" name="program" value="{{ program }}"></div>
+    </div>
+    <div class="grid three">
+      <div class="field">
+        <label>最高级别（含）</label>
+        <select name="prio">
+          <option value="">全部</option>
+          {% for value, label in [("0","emerg"),("1","alert"),("2","crit"),("3","err"),("4","warning"),("5","notice"),("6","info"),("7","debug")] %}
+          <option value="{{ value }}" {% if prio == value %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field" style="display:flex;align-items:flex-end"><button class="primary" type="submit">搜索</button></div>
+      <div class="field" style="display:flex;align-items:flex-end">
+        <label class="check"><input type="checkbox" id="live" {% if request.query_params.get('live') %}checked{% endif %}> 自动刷新（10s）</label>
+      </div>
+    </div>
+  </form>
+
+  <table>
+    <thead><tr><th>时间</th><th>主机</th><th>程序</th><th>级别</th><th>消息</th></tr></thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td class="mono">{{ row.ReceivedAt }}</td>
+        <td>{{ row.FromHost }}{% if row.FromHostIP %} <span class="muted">({{ row.FromHostIP }})</span>{% endif %}</td>
+        <td class="mono">{{ row.ProgramName }}</td>
+        <td>{{ row.PriorityName }}</td>
+        <td class="mono">{{ row.Message }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="empty">没有匹配的日志</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% set qs = "q=" ~ (q|urlencode) ~ "&host=" ~ (host|urlencode) ~ "&program=" ~ (program|urlencode) ~ "&prio=" ~ (prio|urlencode) %}
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
+    <span class="muted">共 {{ total }} 条 · 第 {{ page }}/{{ pages }} 页</span>
+    <span>
+      {% if page > 1 %}<a class="btn small" href="/syslog?{{ qs }}&page={{ page - 1 }}">上一页</a>{% endif %}
+      {% if page < pages %}<a class="btn small" href="/syslog?{{ qs }}&page={{ page + 1 }}">下一页</a>{% endif %}
+    </span>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var live = document.getElementById('live');
+    if (!live || !live.checked) return;
+    setTimeout(function () { window.location.reload(); }, 10000);
+  })();
+</script>
+{% endblock %}

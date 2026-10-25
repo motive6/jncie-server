@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}网络配置{% endblock %}
+{% block heading %}网络配置{% endblock %}
+{% block sub %}{{ hostname }} · 默认路由 {{ route }}{% endblock %}
+{% block actions %}
+  {% if state.managed %}<span class="pill ok"><span class="dot"></span>由面板管理</span>
+  {% else %}<span class="pill"><span class="dot"></span>未接管</span>{% endif %}
+{% endblock %}
+
+{% block content %}
+{% if pending.pending %}
+<div class="flash err">
+  网络配置已应用，等待确认{% if pending.remaining %}（约 {{ pending.remaining }} 秒后自动回滚）{% endif %}。
+  {% if is_admin %}
+  <form method="post" action="/network/confirm" style="display:inline;margin-left:10px">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="small" type="submit">保持此配置</button>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>当前状态</h2>
+  <table>
+    <tbody>
+      <tr><th>主机名</th><td class="mono">{{ hostname }}</td></tr>
+      <tr><th>默认路由</th><td class="mono">{{ route }}</td></tr>
+      <tr><th>DNS 服务器</th><td class="mono">{{ dns | join(", ") or "-" }}</td></tr>
+      <tr><th>管理方式</th><td>{{ "面板生成 /etc/netplan/60-svcadmin.yaml" if state.managed else "系统原有配置（面板尚未接管）" }}</td></tr>
+    </tbody>
+  </table>
+  {% if interfaces %}
+  <table style="margin-top:12px">
+    <thead><tr><th>网卡</th><th>状态</th><th>MAC</th><th>IPv4</th><th>IPv6</th></tr></thead>
+    <tbody>
+      {% for i in interfaces %}
+      <tr>
+        <td class="mono"><strong>{{ i.name }}</strong></td>
+        <td>
+          {% if i.state == "up" %}<span class="pill ok"><span class="dot"></span>在线</span>
+          {% else %}<span class="pill"><span class="dot"></span>{{ i.state or "未知" }}</span>{% endif %}
+        </td>
+        <td class="mono">{{ i.mac or "-" }}</td>
+        <td class="mono">{{ i.ipv4 | join(", ") or "-" }}</td>
+        <td class="mono">{{ i.ipv6 | join(", ") or "-" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">未读取到网卡信息</p>
+  {% endif %}
+</div>
+
+{% if is_admin and interfaces %}
+<div class="card">
+  <h2>修改网络</h2>
+  <p class="hint">修改管理地址会断开当前连接；应用后有 90 秒确认时间，未确认将自动回滚。</p>
+  <form method="post" action="/network/apply">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid three">
+      <div class="field">
+        <label>网卡</label>
+        <select name="interface">
+          {% for i in interfaces %}
+          <option value="{{ i.name }}" {% if i.name == selected_iface %}selected{% endif %}>{{ i.name }}（{{ i.ipv4 | join(", ") or "无地址" }}）</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>获取方式</label>
+        <select name="mode" id="modeSelect">
+          <option value="dhcp" {% if selected_mode == "dhcp" %}selected{% endif %}>DHCP 自动获取</option>
+          <option value="static" {% if selected_mode == "static" %}selected{% endif %}>静态地址</option>
+        </select>
+      </div>
+      <div class="field"></div>
+    </div>
+    <div class="grid two" id="staticFields">
+      <div class="field">
+        <label>地址（CIDR）</label>
+        <input type="text" name="cidr" value="{{ default_cidr }}" placeholder="10.10.10.1/24">
+      </div>
+      <div class="field">
+        <label>网关</label>
+        <input type="text" name="gateway" value="{{ default_gateway }}" placeholder="10.10.10.254">
+      </div>
+    </div>
+    <button class="primary" type="submit" onclick="return confirm('应用网络配置？修改地址会断开当前连接，90 秒内可确认保留。')">应用配置（90 秒内可回滚）</button>
+  </form>
+</div>
+{% elif not is_admin %}
+<div class="card">
+  <h2>修改网络</h2>
+  <p class="empty">只读账号只能查看当前网络状态。</p>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>说明</h2>
+  <ul style="margin:0;padding-left:18px;color:var(--muted);font-size:13px;line-height:1.9">
+    <li>面板只生成并管理 <span class="mono">/etc/netplan/60-svcadmin.yaml</span>，首次应用时会禁用 cloud-init 的网络配置，避免开机被覆盖。</li>
+    <li>应用流程：备份现有 netplan → 写入配置 → <span class="mono">netplan generate</span> 校验 → <span class="mono">netplan apply</span> → 启动 90 秒回滚计时器。</li>
+    <li>倒计时内点击「保持此配置」即取消回滚；若地址配错导致失联，计时器会自动恢复原配置。</li>
+    <li>DNS 仍由本机 DNS 代理提供（<span class="mono">/etc/resolv.conf</span> 指向 127.0.0.1），上游请到「DNS 代理」页配置。</li>
+  </ul>
+</div>
+
+<script>
+  (function () {
+    var select = document.getElementById('modeSelect');
+    var fields = document.getElementById('staticFields');
+    if (!select || !fields) return;
+    function sync() { fields.style.display = select.value === 'static' ? '' : 'none'; }
+    select.addEventListener('change', sync);
+    sync();
+  })();
+</script>
+{% endblock %}

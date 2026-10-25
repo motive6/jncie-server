@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}审计日志{% endblock %}
+{% block heading %}审计日志{% endblock %}
+{% block sub %}所有服务配置变更与操作结果{% endblock %}
+
+{% block content %}
+<div class="card">
+  <form method="get" action="/audit" class="grid three" style="margin-bottom:6px">
+    <div class="field">
+      <label>服务</label>
+      <select name="service">
+        <option value="">全部</option>
+        {% for key in ["ftp","dns","radius","syslog","snmp"] %}
+        <option value="{{ key }}" {% if service == key %}selected{% endif %}>{{ key }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field" style="display:flex;align-items:flex-end"><button type="submit">筛选</button></div>
+  </form>
+
+  <table>
+    <thead><tr><th>时间（{{ timezone }}）</th><th>操作者</th><th>服务</th><th>动作</th><th>详情</th><th>结果</th></tr></thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td class="mono">{{ row.ts.strftime("%Y-%m-%d %H:%M:%S") if row.ts else "" }}</td>
+        <td>{{ row.username }}</td>
+        <td>{{ row.service }}</td>
+        <td>{{ row.action }}</td>
+        <td class="mono">{{ row.detail }}</td>
+        <td>{% if row.result == "ok" %}<span class="pill ok"><span class="dot"></span>成功</span>{% else %}<span class="pill err"><span class="dot"></span>失败</span>{% endif %}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="empty">没有记录</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+    {% if page > 1 %}<a class="btn small" href="/audit?page={{ page - 1 }}&service={{ service }}">上一页</a>{% endif %}
+    {% if has_next %}<a class="btn small" href="/audit?page={{ page + 1 }}&service={{ service }}">下一页</a>{% endif %}
+  </div>
+</div>
+{% endblock %}

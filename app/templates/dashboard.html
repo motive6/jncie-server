@@ -1,0 +1,296 @@
+{% extends "base.html" %}
+{% block title %}总览{% endblock %}
+{% block heading %}总览{% endblock %}
+{% block sub %}五个服务的运行状态与最近操作{% endblock %}
+
+{% block content %}
+<div class="card">
+  <h2>系统状态</h2>
+  <div class="chart-toolbar">
+    <span class="muted" id="sysStatus">加载中…</span>
+    <span class="muted" id="sysUptime"></span>
+  </div>
+  <div class="grid four">
+    <div class="stat-tile">
+      <div class="name">CPU 使用率</div>
+      <div class="value"><span id="cpuVal">-</span><span class="stat-state" id="cpuState"></span></div>
+      <svg class="spark" id="cpuSpark" aria-hidden="true"></svg>
+    </div>
+    <div class="stat-tile">
+      <div class="name">内存使用率</div>
+      <div class="value"><span id="memVal">-</span><span class="stat-state" id="memState"></span></div>
+      <svg class="spark" id="memSpark" aria-hidden="true"></svg>
+    </div>
+    <div class="stat-tile">
+      <div class="name">磁盘使用率（/）</div>
+      <div class="value"><span id="diskVal">-</span><span class="stat-state" id="diskState"></span></div>
+      <svg class="spark" id="diskSpark" aria-hidden="true"></svg>
+    </div>
+    <div class="stat-tile">
+      <div class="name">1 分钟负载</div>
+      <div class="value"><span id="loadVal">-</span><span class="stat-state" id="loadState"></span></div>
+      <svg class="spark" id="loadSpark" aria-hidden="true"></svg>
+    </div>
+  </div>
+
+  <div class="chart-wrap" style="margin-top:18px">
+    <div class="chart-subtitle">网络吞吐 <span class="muted" id="netNow"></span></div>
+    <svg id="netChart" role="img" aria-label="服务器网络吞吐" tabindex="0"></svg>
+    <div class="chart-legend">
+      <span><i style="background:#008300"></i>入站</span>
+      <span><i style="background:#2a78d6"></i>出站</span>
+      <span class="muted">每 10 秒自动刷新 · 最近 15 分钟</span>
+    </div>
+  </div>
+</div>
+
+<div class="grid three">
+  {% for s in statuses %}
+  <a class="card stat" href="{{ s.url }}" style="text-decoration:none;color:inherit">
+    <div class="name">{{ s.label }} <span class="muted">:{{ s.port }}</span></div>
+    <div class="value">
+      {% if s.active %}
+        <span class="pill ok"><span class="dot"></span>运行中</span>
+      {% else %}
+        <span class="pill err"><span class="dot"></span>{{ s.state }}</span>
+      {% endif %}
+    </div>
+    <div class="sub">{{ s.desc }}</div>
+    <div class="sub">{% if s.listening %}端口监听中{% else %}端口未监听{% endif %}</div>
+  </a>
+  {% endfor %}
+</div>
+
+<div class="card">
+  <h2>最近操作</h2>
+  <p class="hint">所有配置变更都会记录在这里</p>
+  {% if recent %}
+  <table>
+    <thead><tr><th>时间（{{ timezone }}）</th><th>操作者</th><th>服务</th><th>动作</th><th>结果</th></tr></thead>
+    <tbody>
+      {% for row in recent %}
+      <tr>
+        <td class="mono">{{ row.ts.strftime("%Y-%m-%d %H:%M:%S") if row.ts else "" }}</td>
+        <td>{{ row.username }}</td>
+        <td>{{ row.service }}</td>
+        <td>{{ row.action }}</td>
+        <td>{% if row.result == "ok" %}<span class="pill ok"><span class="dot"></span>成功</span>{% else %}<span class="pill err"><span class="dot"></span>失败</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">还没有操作记录</p>
+  {% endif %}
+</div>
+
+<script>
+(function () {
+  var COLORS = { net_in: '#008300', net_out: '#2a78d6', spark: '#2a78d6' };
+  var GRID = '#e1e0d9';
+  var INK_MUTED = '#898781';
+  var AXIS = '#c3c2b7';
+  var last = null;
+
+  function el(name, attrs) {
+    var node = document.createElementNS('http://www.w3.org/2000/svg', name);
+    for (var key in attrs) node.setAttribute(key, attrs[key]);
+    return node;
+  }
+
+  function fmtBps(v) {
+    v = Number(v) || 0;
+    if (v >= 1e9) return (v / 1e9).toFixed(2) + ' Gbps';
+    if (v >= 1e6) return (v / 1e6).toFixed(2) + ' Mbps';
+    if (v >= 1e3) return (v / 1e3).toFixed(1) + ' Kbps';
+    return Math.round(v) + ' bps';
+  }
+
+  function niceMax(v) {
+    if (v <= 0) return 1;
+    var exp = Math.pow(10, Math.floor(Math.log10(v)));
+    var f = v / exp;
+    return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * exp;
+  }
+
+  function hm(ts) {
+    var d = new Date(ts * 1000);
+    var pad = function (n) { return String(n).padStart(2, '0'); };
+    return pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  function setState(id, level) {
+    var node = document.getElementById(id);
+    if (!node) return;
+    var map = { ok: ['正常', '#898781'], warn: ['偏高', '#f79009'], bad: ['过高', '#d03b3b'] };
+    var item = map[level] || map.ok;
+    node.textContent = item[0];
+    node.style.color = item[1];
+  }
+
+  function sparkline(svg, values, color) {
+    var w = svg.clientWidth || 220;
+    var h = 44;
+    var pad = 2;
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    if (!values.length) return;
+    var max = Math.max.apply(null, values.concat([1]));
+    var step = values.length > 1 ? (w - pad * 2) / (values.length - 1) : 0;
+    var x = function (i) { return pad + i * step; };
+    var y = function (v) { return h - pad - (v / max) * (h - pad * 2); };
+    var d = '';
+    values.forEach(function (v, i) {
+      d += (i ? ' L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1);
+    });
+    var area = d + ' L' + x(values.length - 1).toFixed(1) + ' ' + (h - pad) +
+      ' L' + x(0).toFixed(1) + ' ' + (h - pad) + ' Z';
+    svg.appendChild(el('path', { d: area, fill: color, 'fill-opacity': 0.12, stroke: 'none' }));
+    svg.appendChild(el('path', {
+      d: d, fill: 'none', stroke: color, 'stroke-width': 2,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round'
+    }));
+  }
+
+  function drawNet(points) {
+    var svg = document.getElementById('netChart');
+    var width = svg.clientWidth || 900;
+    var height = 150;
+    var pad = { l: 58, r: 12, t: 10, b: 24 };
+    svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+    svg.setAttribute('width', width);
+    svg.setAttribute('height', height);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    if (!points.length) {
+      var empty = el('text', {
+        x: width / 2, y: height / 2, 'text-anchor': 'middle', fill: INK_MUTED, 'font-size': 12
+      });
+      empty.textContent = '正在采集数据…';
+      svg.appendChild(empty);
+      return;
+    }
+    var vmax = 0;
+    points.forEach(function (p) { vmax = Math.max(vmax, p.rx, p.tx); });
+    var top = niceMax(vmax);
+    var t0 = points[0].t;
+    var t1 = points[points.length - 1].t;
+    if (t1 === t0) t1 = t0 + 1;
+    var x = function (t) { return pad.l + (t - t0) / (t1 - t0) * (width - pad.l - pad.r); };
+    var y = function (v) { return pad.t + (1 - v / top) * (height - pad.t - pad.b); };
+
+    for (var i = 0; i <= 3; i++) {
+      var value = top * i / 3;
+      var yy = y(value);
+      svg.appendChild(el('line', { x1: pad.l, x2: width - pad.r, y1: yy, y2: yy, stroke: GRID, 'stroke-width': 1 }));
+      var label = el('text', {
+        x: pad.l - 8, y: yy + 4, 'text-anchor': 'end', fill: INK_MUTED,
+        'font-size': 11, 'font-variant-numeric': 'tabular-nums'
+      });
+      label.textContent = fmtBps(value);
+      svg.appendChild(label);
+    }
+    for (var j = 0; j <= 4; j++) {
+      var tt = t0 + (t1 - t0) * j / 4;
+      var xl = el('text', {
+        x: x(tt), y: height - 8,
+        'text-anchor': j === 0 ? 'start' : j === 4 ? 'end' : 'middle',
+        fill: INK_MUTED, 'font-size': 11
+      });
+      xl.textContent = hm(tt);
+      svg.appendChild(xl);
+    }
+    svg.appendChild(el('line', {
+      x1: pad.l, x2: width - pad.r, y1: height - pad.b, y2: height - pad.b,
+      stroke: AXIS, 'stroke-width': 1
+    }));
+
+    function pathFor(key) {
+      var d = '';
+      points.forEach(function (p, idx) {
+        d += (idx ? ' L' : 'M') + x(p.t).toFixed(1) + ' ' + y(p[key]).toFixed(1);
+      });
+      return d;
+    }
+
+    var rxPath = pathFor('rx');
+    var areaD = rxPath + ' L' + x(points[points.length - 1].t).toFixed(1) + ' ' + (height - pad.b) +
+      ' L' + x(points[0].t).toFixed(1) + ' ' + (height - pad.b) + ' Z';
+    svg.appendChild(el('path', { d: areaD, fill: COLORS.net_in, 'fill-opacity': 0.14, stroke: 'none' }));
+    svg.appendChild(el('path', {
+      d: rxPath, fill: 'none', stroke: COLORS.net_in, 'stroke-width': 2, 'stroke-linejoin': 'round'
+    }));
+    svg.appendChild(el('path', {
+      d: pathFor('tx'), fill: 'none', stroke: COLORS.net_out, 'stroke-width': 2, 'stroke-linejoin': 'round'
+    }));
+  }
+
+  function render(data) {
+    last = data;
+    var latest = data.latest;
+    var points = data.points || [];
+    var statusEl = document.getElementById('sysStatus');
+    var uptimeEl = document.getElementById('sysUptime');
+    if (!latest) {
+      statusEl.textContent = '正在采集数据…';
+      drawNet([]);
+      return;
+    }
+    var memPct = latest.memTotal ? latest.mem / latest.memTotal * 100 : 0;
+    var diskPct = latest.diskTotal ? latest.disk / latest.diskTotal * 100 : 0;
+    var cores = data.cores || 1;
+
+    document.getElementById('cpuVal').textContent = latest.cpu.toFixed(1) + '%';
+    document.getElementById('memVal').textContent = memPct.toFixed(1) + '%';
+    document.getElementById('diskVal').textContent = diskPct.toFixed(1) + '%';
+    document.getElementById('loadVal').textContent = latest.load.toFixed(2);
+
+    setState('cpuState', latest.cpu >= 90 ? 'bad' : latest.cpu >= 75 ? 'warn' : 'ok');
+    setState('memState', memPct >= 90 ? 'bad' : memPct >= 75 ? 'warn' : 'ok');
+    setState('diskState', diskPct >= 90 ? 'bad' : diskPct >= 75 ? 'warn' : 'ok');
+    setState('loadState', latest.load >= cores * 2 ? 'bad' : latest.load >= cores ? 'warn' : 'ok');
+
+    sparkline(document.getElementById('cpuSpark'), points.map(function (p) { return p.cpu; }), COLORS.spark);
+    sparkline(document.getElementById('memSpark'), points.map(function (p) {
+      return p.memTotal ? p.mem / p.memTotal * 100 : 0;
+    }), COLORS.spark);
+    sparkline(document.getElementById('diskSpark'), points.map(function (p) {
+      return p.diskTotal ? p.disk / p.diskTotal * 100 : 0;
+    }), COLORS.spark);
+    sparkline(document.getElementById('loadSpark'), points.map(function (p) { return p.load; }), COLORS.spark);
+
+    var days = Math.floor(data.uptime / 86400);
+    var hours = Math.floor((data.uptime % 86400) / 3600);
+    var minutes = Math.floor((data.uptime % 3600) / 60);
+    uptimeEl.textContent = '已运行 ' + (days ? days + ' 天 ' : '') + hours + ' 小时 ' + minutes + ' 分';
+
+    document.getElementById('netNow').textContent =
+      '当前 入站 ' + fmtBps(latest.rx) + ' · 出站 ' + fmtBps(latest.tx);
+    drawNet(points);
+    statusEl.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  }
+
+  function load() {
+    fetch('/dashboard/system.json?minutes=15', { headers: { Accept: 'application/json' } })
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(render)
+      .catch(function (err) {
+        document.getElementById('sysStatus').textContent = '加载失败：' + err.message;
+      });
+  }
+
+  var resizeTimer = null;
+  window.addEventListener('resize', function () {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () { if (last) render(last); }, 150);
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) load();
+  });
+  setInterval(load, 10000);
+  load();
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}总览{% endblock %} · SVC Admin</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+{% if dry_run %}<div class="dry-banner">dry-run 模式：配置只渲染不落盘，服务不会被修改</div>{% endif %}
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand"><span class="dot"></span>SVC Admin</div>
+    <nav>
+      <a href="/" class="{{ 'active' if active == 'dashboard' else '' }}">总览</a>
+      <a href="/ftp" class="{{ 'active' if active == 'ftp' else '' }}">FTP</a>
+      <a href="/dns" class="{{ 'active' if active == 'dns' else '' }}">DNS 代理</a>
+      <a href="/radius" class="{{ 'active' if active == 'radius' else '' }}">RADIUS</a>
+      <a href="/syslog" class="{{ 'active' if active == 'syslog' else '' }}">Syslog</a>
+      <a href="/snmp" class="{{ 'active' if active == 'snmp' else '' }}">SNMP</a>
+      {% if snmp_hosts %}
+      <div class="subnav">
+        {% for h in snmp_hosts %}
+        <a href="/snmp/host/{{ h.id }}" class="{{ 'active' if active_host is defined and active_host == h.id else '' }}">{{ h.name }}</a>
+        {% endfor %}
+      </div>
+      {% endif %}
+      <a href="/ntp" class="{{ 'active' if active == 'ntp' else '' }}">NTP</a>
+      <a href="/network" class="{{ 'active' if active == 'network' else '' }}">网络配置</a>
+      <a href="/audit" class="{{ 'active' if active == 'audit' else '' }}">审计日志</a>
+      <a href="/users" class="{{ 'active' if active == 'users' else '' }}">用户管理</a>
+    </nav>
+    <div class="side-foot">
+      <span>{{ user }}{% if not is_admin %} · 只读{% endif %}</span>
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="link" type="submit">退出</button>
+      </form>
+    </div>
+  </aside>
+  <main>
+    <header class="page">
+      <div>
+        <h1>{% block heading %}{% endblock %}</h1>
+        <p>{% block sub %}{% endblock %}</p>
+      </div>
+      <div>{% block actions %}{% endblock %}</div>
+    </header>
+    {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
+    {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
+    {% if not is_admin %}<div class="flash info">只读账号：可以查看所有配置与状态，但不能修改。</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>

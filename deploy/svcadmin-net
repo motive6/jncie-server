@@ -1,0 +1,240 @@
+#!/usr/bin/python3
+"""SVC Admin 网络配置助手。
+
+只接受固定子命令：apply / confirm / pending / show / rollback <backup-dir>
+- apply   读取 /var/lib/svcadmin/staging/network/spec.json，生成 /etc/netplan/60-svcadmin.yaml，
+          校验后应用，并安排 90 秒后自动回滚（除非 confirm）。
+- confirm 取消未触发的自动回滚，保留当前配置。
+- pending 返回是否有待确认的回滚及其剩余时间。
+- show    返回当前是否由面板管理以及配置模式。
+- rollback 还原备份并重新应用（由 systemd-run 触发，也可手工执行）。
+"""
+
+import ipaddress
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+STAGE = Path("/var/lib/svcadmin/staging/network")
+STORE = Path("/var/lib/svcadmin/network")
+NETPLAN_DIR = Path("/etc/netplan")
+OURS = NETPLAN_DIR / "60-svcadmin.yaml"
+CLOUD_DISABLE = Path("/etc/cloud/cloud.cfg.d/99-svcadmin-disable-network-config.cfg")
+UNIT = "svcadmin-net-rollback"
+ROLLBACK_SECONDS = 90
+IFACE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
+
+
+def emit(ok, messages, **extra):
+    print(json.dumps({"ok": bool(ok), "messages": [str(m) for m in messages], **extra}, ensure_ascii=False))
+    sys.exit(0)
+
+
+def run(args, timeout=60):
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return proc.returncode, (proc.stdout + proc.stderr).strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, str(exc)
+
+
+def load_spec():
+    path = STAGE / "spec.json"
+    if not path.is_file():
+        emit(False, [f"找不到配置：{path}"])
+    try:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        emit(False, [f"配置无法解析：{exc}"])
+    if not isinstance(spec, dict):
+        emit(False, ["配置格式错误"])
+    return spec
+
+
+def validate(spec):
+    interface = str(spec.get("interface", ""))
+    mode = str(spec.get("mode", "dhcp"))
+    cidr = str(spec.get("cidr", "")).strip()
+    gateway = str(spec.get("gateway", "")).strip()
+
+    if interface == "lo" or not IFACE_RE.match(interface):
+        emit(False, ["网卡名称不合法"])
+    if interface not in os.listdir("/sys/class/net"):
+        emit(False, [f"网卡 {interface} 不存在"])
+    if mode not in ("dhcp", "static"):
+        emit(False, ["模式只能是 dhcp 或 static"])
+    if mode == "static":
+        try:
+            iface = ipaddress.ip_interface(cidr)
+        except ValueError:
+            emit(False, ["地址必须是 CIDR 格式，例如 10.10.10.1/24"])
+        if iface.version != 4:
+            emit(False, ["目前只支持 IPv4"])
+        if gateway:
+            try:
+                gw = ipaddress.ip_address(gateway)
+            except ValueError:
+                emit(False, ["网关不是合法 IPv4 地址"])
+            if gw not in iface.network:
+                emit(False, ["网关不在该地址所在网段内"])
+    return {"interface": interface, "mode": mode, "cidr": cidr, "gateway": gateway}
+
+
+def render(spec):
+    lines = [
+        "# Managed by SVC Admin. Manual edits will be overwritten.",
+        "network:",
+        "  version: 2",
+        "  renderer: networkd",
+        "  ethernets:",
+        f"    {spec['interface']}:",
+    ]
+    if spec["mode"] == "dhcp":
+        lines += ["      dhcp4: true", "      dhcp6: false"]
+    else:
+        lines += ["      dhcp4: false", "      dhcp6: false", "      addresses:", f"        - {spec['cidr']}"]
+        if spec["gateway"]:
+            lines += ["      routes:", "        - to: default", f"          via: {spec['gateway']}"]
+    return "\n".join(lines) + "\n"
+
+
+def backup():
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    target = STORE / stamp
+    (target / "netplan").mkdir(parents=True, exist_ok=True)
+    for item in NETPLAN_DIR.glob("*.yaml"):
+        shutil.copy2(item, target / "netplan" / item.name)
+    (target / "cloud-disable.txt").write_text("1" if CLOUD_DISABLE.exists() else "0", encoding="utf-8")
+    return target
+
+
+def restore(target: Path):
+    for item in NETPLAN_DIR.glob("*.yaml"):
+        item.unlink()
+    for item in (target / "netplan").glob("*.yaml"):
+        shutil.copy2(item, NETPLAN_DIR / item.name)
+    marker = target / "cloud-disable.txt"
+    existed = marker.read_text(encoding="utf-8").strip() == "1" if marker.exists() else False
+    if not existed and CLOUD_DISABLE.exists():
+        CLOUD_DISABLE.unlink()
+
+
+def schedule_rollback(target: Path):
+    run(["systemctl", "stop", f"{UNIT}.timer"])
+    run(["systemctl", "reset-failed", f"{UNIT}.service"])
+    code, output = run([
+        "systemd-run",
+        f"--unit={UNIT}",
+        "--collect",
+        f"--on-active={ROLLBACK_SECONDS}",
+        "--timer-property=AccuracySec=1s",
+        "/usr/local/sbin/svcadmin-net",
+        "rollback",
+        str(target),
+    ])
+    return code == 0, output
+
+
+def cmd_apply():
+    spec = validate(load_spec())
+    target = backup()
+    try:
+        OURS.write_text(render(spec), encoding="utf-8")
+        os.chmod(OURS, 0o600)
+        CLOUD_DISABLE.parent.mkdir(parents=True, exist_ok=True)
+        CLOUD_DISABLE.write_text("network: {config: disabled}\n", encoding="utf-8")
+    except OSError as exc:
+        restore(target)
+        emit(False, [f"写入配置失败：{exc}"])
+
+    code, output = run(["netplan", "generate"], timeout=60)
+    if code != 0:
+        restore(target)
+        emit(False, [f"配置校验失败：{output[-800:]}"])
+
+    code, output = run(["netplan", "apply"], timeout=90)
+    if code != 0:
+        restore(target)
+        run(["netplan", "apply"], timeout=90)
+        emit(False, [f"应用失败，已还原：{output[-600:]}"])
+
+    scheduled, scheduler_output = schedule_rollback(target)
+    if not scheduled:
+        emit(True, [f"配置已生效，但自动回滚未能安排：{scheduler_output[-300:]}"], pending=False)
+
+    emit(
+        True,
+        [f"配置已生效；{ROLLBACK_SECONDS} 秒内未确认将自动回滚"],
+        pending=True,
+        seconds=ROLLBACK_SECONDS,
+        backup=str(target),
+    )
+
+
+def cmd_confirm():
+    run(["systemctl", "stop", f"{UNIT}.timer"])
+    run(["systemctl", "reset-failed", f"{UNIT}.service"])
+    code, state = run(["systemctl", "is-active", f"{UNIT}.timer"])
+    ok = state.strip() not in ("active", "activating")
+    emit(ok, ["已保留当前配置" if ok else f"取消回滚失败：{state}"], pending=not ok)
+
+
+def cmd_pending():
+    code, state = run(["systemctl", "is-active", f"{UNIT}.timer"])
+    active = state.strip() in ("active", "activating")
+    remaining = None
+    if active:
+        code, value = run(["systemctl", "show", f"{UNIT}.timer", "-p", "NextElapseUSecRealtime", "--value"])
+        try:
+            remaining = max(int(int(value.strip()) / 1_000_000 - time.time()), 0)
+        except (TypeError, ValueError):
+            remaining = None
+    emit(True, [], pending=active, remaining=remaining)
+
+
+def cmd_show():
+    mode = "dhcp"
+    managed = OURS.exists() and OURS.stat().st_size > 0
+    if managed:
+        text = OURS.read_text(encoding="utf-8", errors="replace")
+        if "dhcp4: true" not in text:
+            mode = "static"
+    emit(True, [], managed=managed, mode=mode)
+
+
+def cmd_rollback(target_dir):
+    target = Path(target_dir)
+    if not str(target).startswith(str(STORE) + "/") or not (target / "netplan").is_dir():
+        emit(False, ["备份目录无效"])
+    restore(target)
+    run(["netplan", "apply"], timeout=90)
+    emit(True, ["已回滚到之前的网络配置"])
+
+
+def main():
+    if os.geteuid() != 0:
+        emit(False, ["必须以 root 运行"])
+    if len(sys.argv) < 2:
+        emit(False, ["用法：svcadmin-net apply|confirm|pending|show|rollback <dir>"])
+    command = sys.argv[1]
+    if command == "apply":
+        cmd_apply()
+    elif command == "confirm":
+        cmd_confirm()
+    elif command == "pending":
+        cmd_pending()
+    elif command == "show":
+        cmd_show()
+    elif command == "rollback" and len(sys.argv) >= 3:
+        cmd_rollback(sys.argv[2])
+    else:
+        emit(False, [f"不支持的命令：{command}"])
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,483 @@
+{% extends "base.html" %}
+{% block title %}{{ host.name }} · SNMP{% endblock %}
+{% block heading %}{{ host.name }}{% endblock %}
+{% block sub %}SNMP {{ host.version }} · {{ host.address }}{% if host.sys_name %} · {{ host.sys_name }}{% endif %}{% endblock %}
+{% block actions %}
+  {% if host.last_ok %}<span class="pill ok"><span class="dot"></span>在线</span>
+  {% else %}<span class="pill err"><span class="dot"></span>离线</span>{% endif %}
+  <a class="btn small" href="/snmp">返回列表</a>
+  {% if is_admin %}
+  <form method="post" action="/snmp/host/{{ host.id }}/poll" style="display:inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="small" type="submit">立即刷新</button>
+  </form>
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+{% if host.last_error %}<div class="flash err">{{ host.last_error }}</div>{% endif %}
+
+<div class="card">
+  <h2>系统信息</h2>
+  <table>
+    <tbody>
+      <tr><th>地址</th><td class="mono">{{ host.address }}</td></tr>
+      <tr><th>SNMP 版本</th><td>{{ host.version }}</td></tr>
+      <tr><th>sysName</th><td>{{ host.sys_name or "-" }}</td></tr>
+      <tr><th>sysLocation</th><td>{{ host.sys_location or "-" }}</td></tr>
+      <tr><th>运行时长</th><td>{{ host.sys_uptime or "-" }}</td></tr>
+      <tr><th>最近探测</th><td class="mono">{{ host.last_polled.strftime("%Y-%m-%d %H:%M:%S") if host.last_polled else "-" }}</td></tr>
+    </tbody>
+  </table>
+  {% if host.sys_descr %}<p class="code-hint" style="margin-top:10px">{{ host.sys_descr }}</p>{% endif %}
+</div>
+
+{% if host.mem_total_kb %}
+{% set mem_used = host.mem_total_kb - host.mem_avail_kb %}
+{% set mem_pct = (mem_used * 100 // host.mem_total_kb) if host.mem_total_kb else 0 %}
+<div class="card">
+  <h2>内存</h2>
+  <div class="kv">
+    <span>已用 <strong>{{ mem_used | size_kb }}</strong> / {{ host.mem_total_kb | size_kb }}</span>
+    <span class="muted">可用 {{ host.mem_avail_kb | size_kb }}</span>
+  </div>
+  <div class="progress {{ 'danger' if mem_pct >= 90 else ('warn' if mem_pct >= 75 else '') }}">
+    <span style="width: {{ mem_pct }}%"></span>
+  </div>
+  <div class="kv"><span class="muted">使用率 {{ mem_pct }}%</span></div>
+
+  {% if host.swap_total_kb %}
+  {% set swap_used = host.swap_total_kb - host.swap_avail_kb %}
+  {% set swap_pct = (swap_used * 100 // host.swap_total_kb) if host.swap_total_kb else 0 %}
+  <hr class="div">
+  <div class="kv">
+    <span>Swap 已用 <strong>{{ swap_used | size_kb }}</strong> / {{ host.swap_total_kb | size_kb }}</span>
+    <span class="muted">可用 {{ host.swap_avail_kb | size_kb }}</span>
+  </div>
+  <div class="progress {{ 'danger' if swap_pct >= 90 else ('warn' if swap_pct >= 75 else '') }}">
+    <span style="width: {{ swap_pct }}%"></span>
+  </div>
+  {% endif %}
+</div>
+{% else %}
+<div class="card">
+  <h2>内存</h2>
+  <p class="empty">未采集到内存信息（设备可能未提供 UCD-SNMP 或 HOST-RESOURCES-MIB）</p>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>磁盘</h2>
+  {% if disks %}
+  <table>
+    <thead><tr><th>挂载点</th><th class="right">总量</th><th class="right">已用</th><th class="right">可用</th><th class="right">使用率</th></tr></thead>
+    <tbody>
+      {% for d in disks %}
+      {% set pct = (d.used_kb * 100 // d.total_kb) if d.total_kb else 0 %}
+      <tr>
+        <td class="mono">{{ d.path }}</td>
+        <td class="right">{{ d.total_kb | size_kb }}</td>
+        <td class="right">{{ d.used_kb | size_kb }}</td>
+        <td class="right">{{ d.avail_kb | size_kb }}</td>
+        <td class="right">{{ pct }}%</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">未采集到磁盘信息</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>接口流量</h2>
+  <div class="chart-toolbar">
+    <label for="ifSelect" style="margin:0">接口</label>
+    <select id="ifSelect" style="width:auto;min-width:140px"></select>
+    <span id="ifMeta" class="muted"></span>
+    <div class="segmented" id="rangeGroup">
+      <button type="button" data-minutes="60" class="active">1 小时</button>
+      <button type="button" data-minutes="360">6 小时</button>
+      <button type="button" data-minutes="1440">24 小时</button>
+    </div>
+    <span class="muted" id="chartStatus">加载中…</span>
+  </div>
+  <div class="chart-wrap">
+    <svg id="trafficChart" role="img" aria-label="接口流量图" tabindex="0"></svg>
+    <div class="chart-tip" id="chartTip" hidden></div>
+  </div>
+  <div id="chartStats" class="chart-stats"></div>
+  <div class="chart-foot muted">每 30 秒自动刷新 · 采样间隔 60 秒 · 保留 24 小时</div>
+  <details class="chart-table">
+    <summary>查看数据表</summary>
+    <div id="chartTable"></div>
+  </details>
+</div>
+
+<script>
+(function () {
+  var hostId = {{ host.id }};
+  var svg = document.getElementById('trafficChart');
+  var tip = document.getElementById('chartTip');
+  var sel = document.getElementById('ifSelect');
+  var statusEl = document.getElementById('chartStatus');
+  var tableEl = document.getElementById('chartTable');
+  var minutes = 60;
+  var data = { points: [], interfaces: [] };
+  var COLORS = { in: '#008300', out: '#2a78d6' };
+  var SURFACE = '#ffffff';
+  var GRID = '#e1e0d9';
+  var INK_MUTED = '#898781';
+  var AXIS = '#c3c2b7';
+
+  function fmtBps(v) {
+    v = Number(v) || 0;
+    if (v >= 1e9) return (v / 1e9).toFixed(2) + ' Gbps';
+    if (v >= 1e6) return (v / 1e6).toFixed(2) + ' Mbps';
+    if (v >= 1e3) return (v / 1e3).toFixed(1) + ' Kbps';
+    return Math.round(v) + ' bps';
+  }
+
+  function niceMax(v) {
+    if (v <= 0) return 1;
+    var exp = Math.pow(10, Math.floor(Math.log10(v)));
+    var f = v / exp;
+    var m = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
+    return m * exp;
+  }
+
+  function timeLabel(ts, withDate) {
+    var d = new Date(ts * 1000);
+    var pad = function (n) { return String(n).padStart(2, '0'); };
+    var hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+    return withDate ? (d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + hm : hm;
+  }
+
+  function el(name, attrs) {
+    var node = document.createElementNS('http://www.w3.org/2000/svg', name);
+    for (var key in attrs) node.setAttribute(key, attrs[key]);
+    return node;
+  }
+
+  function draw() {
+    var width = svg.clientWidth || 800;
+    var height = 260;
+    var pad = { l: 62, r: 16, t: 12, b: minutes > 360 ? 58 : 28 };
+    svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+    svg.setAttribute('width', width);
+    svg.setAttribute('height', height);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    var pts = data.points || [];
+    if (!pts.length) {
+      var empty = el('text', {
+        x: width / 2, y: height / 2, 'text-anchor': 'middle',
+        fill: INK_MUTED, 'font-size': 13
+      });
+      empty.textContent = '还没有采样数据（每 60 秒生成一个点）';
+      svg.appendChild(empty);
+      tableEl.textContent = '';
+      return;
+    }
+
+    var vmax = 0;
+    pts.forEach(function (p) { vmax = Math.max(vmax, p[1], p[2]); });
+    var top = niceMax(vmax);
+    var t0 = pts[0][0];
+    var t1 = pts[pts.length - 1][0];
+    if (t1 === t0) t1 = t0 + 1;
+    var x = function (t) { return pad.l + (t - t0) / (t1 - t0) * (width - pad.l - pad.r); };
+    var y = function (v) { return pad.t + (1 - v / top) * (height - pad.t - pad.b); };
+
+    for (var i = 0; i <= 4; i++) {
+      var val = top * i / 4;
+      var yy = y(val);
+      svg.appendChild(el('line', { x1: pad.l, x2: width - pad.r, y1: yy, y2: yy, stroke: GRID, 'stroke-width': 1 }));
+      var lbl = el('text', {
+        x: pad.l - 8, y: yy + 4, 'text-anchor': 'end',
+        fill: INK_MUTED, 'font-size': 11, 'font-variant-numeric': 'tabular-nums'
+      });
+      lbl.textContent = fmtBps(val);
+      svg.appendChild(lbl);
+    }
+
+    var rotated = minutes > 360;
+    for (var j = 0; j <= 5; j++) {
+      var tt = t0 + (t1 - t0) * j / 5;
+      var xx = x(tt);
+      svg.appendChild(el('line', {
+        x1: xx, x2: xx, y1: pad.t, y2: height - pad.b,
+        stroke: GRID, 'stroke-width': 1, 'stroke-dasharray': '2 4'
+      }));
+      var xl = el('text', {
+        x: xx,
+        y: height - 8,
+        'text-anchor': rotated ? 'end' : j === 0 ? 'start' : j === 5 ? 'end' : 'middle',
+        fill: INK_MUTED, 'font-size': 11, 'font-variant-numeric': 'tabular-nums'
+      });
+      if (rotated) {
+        xl.setAttribute('transform', 'rotate(-90 ' + xx + ' ' + (height - 8) + ')');
+      }
+      xl.textContent = timeLabel(tt, rotated);
+      svg.appendChild(xl);
+    }
+    svg.appendChild(el('line', {
+      x1: pad.l, x2: width - pad.r, y1: height - pad.b, y2: height - pad.b,
+      stroke: AXIS, 'stroke-width': 1
+    }));
+
+    var defs = el('defs', {});
+    var grad = el('linearGradient', { id: 'inFill', x1: '0', y1: '0', x2: '0', y2: '1' });
+    grad.appendChild(el('stop', { offset: '0%', 'stop-color': COLORS.in, 'stop-opacity': '0.24' }));
+    grad.appendChild(el('stop', { offset: '100%', 'stop-color': COLORS.in, 'stop-opacity': '0.02' }));
+    defs.appendChild(grad);
+    svg.appendChild(defs);
+
+    function linePath(index) {
+      var d = '';
+      pts.forEach(function (p, idx) {
+        d += (idx ? ' L' : 'M') + x(p[0]).toFixed(1) + ' ' + y(p[index]).toFixed(1);
+      });
+      return d;
+    }
+
+    var baseY = height - pad.b;
+    var areaD = linePath(1) +
+      ' L' + x(pts[pts.length - 1][0]).toFixed(1) + ' ' + baseY +
+      ' L' + x(pts[0][0]).toFixed(1) + ' ' + baseY + ' Z';
+    svg.appendChild(el('path', { d: areaD, fill: 'url(#inFill)', stroke: 'none' }));
+    svg.appendChild(el('path', {
+      d: linePath(1), fill: 'none', stroke: COLORS.in, 'stroke-width': 2,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round'
+    }));
+    svg.appendChild(el('path', {
+      d: linePath(2), fill: 'none', stroke: COLORS.out, 'stroke-width': 2,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round'
+    }));
+
+    var cross = el('line', {
+      y1: pad.t, y2: height - pad.b, stroke: AXIS, 'stroke-width': 1,
+      'stroke-dasharray': '3 3', opacity: 0
+    });
+    var dotIn = el('circle', { r: 4, fill: COLORS.in, stroke: SURFACE, 'stroke-width': 2, opacity: 0 });
+    var dotOut = el('circle', { r: 4, fill: COLORS.out, stroke: SURFACE, 'stroke-width': 2, opacity: 0 });
+    var hit = el('rect', {
+      x: pad.l, y: pad.t, width: Math.max(width - pad.l - pad.r, 1),
+      height: height - pad.t - pad.b, fill: 'transparent'
+    });
+    svg.appendChild(cross);
+    svg.appendChild(dotIn);
+    svg.appendChild(dotOut);
+    svg.appendChild(hit);
+
+    function showAt(clientX) {
+      var rect = svg.getBoundingClientRect();
+      var px = clientX - rect.left;
+      var best = 0;
+      var bestDist = Infinity;
+      for (var k = 0; k < pts.length; k++) {
+        var dist = Math.abs(x(pts[k][0]) - px);
+        if (dist < bestDist) { bestDist = dist; best = k; }
+      }
+      var p = pts[best];
+      var px2 = x(p[0]);
+      cross.setAttribute('x1', px2);
+      cross.setAttribute('x2', px2);
+      cross.setAttribute('opacity', 1);
+      dotIn.setAttribute('cx', px2);
+      dotIn.setAttribute('cy', y(p[1]));
+      dotIn.setAttribute('opacity', 1);
+      dotOut.setAttribute('cx', px2);
+      dotOut.setAttribute('cy', y(p[2]));
+      dotOut.setAttribute('opacity', 1);
+
+      tip.hidden = false;
+      tip.textContent = '';
+      var head = document.createElement('div');
+      head.className = 't';
+      head.textContent = timeLabel(p[0], true);
+      tip.appendChild(head);
+      [['入站', p[1], COLORS.in], ['出站', p[2], COLORS.out]].forEach(function (row) {
+        var line = document.createElement('div');
+        line.className = 'row';
+        var key = document.createElement('span');
+        key.className = 'k';
+        var swatch = document.createElement('i');
+        swatch.style.background = row[2];
+        key.appendChild(swatch);
+        key.appendChild(document.createTextNode(row[0]));
+        var val = document.createElement('span');
+        val.className = 'v';
+        val.textContent = fmtBps(row[1]);
+        line.appendChild(key);
+        line.appendChild(val);
+        tip.appendChild(line);
+      });
+      var wrapRect = svg.parentElement.getBoundingClientRect();
+      var left = px2 + 12;
+      if (left + 170 > wrapRect.width) left = px2 - 182;
+      tip.style.left = Math.max(left, 0) + 'px';
+      tip.style.top = Math.max(0, Math.min(rect.top - wrapRect.top + pad.t, wrapRect.height - 90)) + 'px';
+    }
+
+    function hide() {
+      cross.setAttribute('opacity', 0);
+      dotIn.setAttribute('opacity', 0);
+      dotOut.setAttribute('opacity', 0);
+      tip.hidden = true;
+    }
+
+    hit.addEventListener('pointermove', function (ev) { showAt(ev.clientX); });
+    hit.addEventListener('pointerleave', hide);
+    svg.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+      ev.preventDefault();
+      var rect = svg.getBoundingClientRect();
+      var current = parseFloat(cross.getAttribute('x1'));
+      var idx = 0;
+      if (!isNaN(current)) {
+        for (var k = 0; k < pts.length; k++) {
+          if (Math.abs(x(pts[k][0]) - current) < 1) { idx = k; break; }
+        }
+      }
+      idx = Math.max(0, Math.min(pts.length - 1, idx + (ev.key === 'ArrowRight' ? 1 : -1)));
+      showAt(rect.left + x(pts[idx][0]));
+    });
+    svg.addEventListener('blur', hide);
+
+    tableEl.textContent = '';
+    var table = document.createElement('table');
+    var thead = document.createElement('thead');
+    var hr = document.createElement('tr');
+    ['时间', '入站', '出站'].forEach(function (name) {
+      var th = document.createElement('th');
+      th.textContent = name;
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    var tbody = document.createElement('tbody');
+    pts.slice(-20).reverse().forEach(function (p) {
+      var tr = document.createElement('tr');
+      [timeLabel(p[0], true), fmtBps(p[1]), fmtBps(p[2])].forEach(function (text) {
+        var td = document.createElement('td');
+        td.textContent = text;
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    tableEl.appendChild(table);
+  }
+
+  function renderStats() {
+    var wrap = document.getElementById('chartStats');
+    wrap.textContent = '';
+    var pts = data.points || [];
+    if (!pts.length) return;
+
+    function calc(index) {
+      var vals = pts.map(function (p) { return p[index]; });
+      var sum = vals.reduce(function (a, b) { return a + b; }, 0);
+      return {
+        latest: vals[vals.length - 1],
+        min: Math.min.apply(null, vals),
+        max: Math.max.apply(null, vals),
+        avg: Math.round(sum / vals.length)
+      };
+    }
+
+    var stats = { in: calc(1), out: calc(2) };
+    var table = document.createElement('table');
+    table.className = 'stats-table';
+    var thead = document.createElement('thead');
+    var hr = document.createElement('tr');
+    ['', '最新', '最小', '平均', '最大'].forEach(function (text) {
+      var th = document.createElement('th');
+      th.textContent = text;
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    [['入站', 'in', COLORS.in], ['出站', 'out', COLORS.out]].forEach(function (row) {
+      var tr = document.createElement('tr');
+      var nameTd = document.createElement('td');
+      nameTd.className = 'name';
+      var swatch = document.createElement('i');
+      swatch.className = 'sw';
+      swatch.style.background = row[2];
+      nameTd.appendChild(swatch);
+      nameTd.appendChild(document.createTextNode(row[0] + (data.name ? '（' + data.name + '）' : '')));
+      tr.appendChild(nameTd);
+      var item = stats[row[1]];
+      [item.latest, item.min, item.avg, item.max].forEach(function (value) {
+        var td = document.createElement('td');
+        td.textContent = fmtBps(value);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+  }
+
+  function renderSelect() {
+    var list = data.interfaces || [];
+    if (!list.length) return;
+    var current = sel.value;
+    sel.textContent = '';
+    list.forEach(function (item) {
+      var opt = document.createElement('option');
+      opt.value = item.ifindex;
+      opt.textContent = item.name;
+      sel.appendChild(opt);
+    });
+    if (current) sel.value = current;
+  }
+
+  function load() {
+    var url = '/snmp/host/' + hostId + '/traffic.json?minutes=' + minutes + '&ifindex=' + (sel.value || 0);
+    fetch(url, { headers: { Accept: 'application/json' } })
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function (payload) {
+        data = payload;
+        renderSelect();
+        draw();
+        renderStats();
+        var meta = document.getElementById('ifMeta');
+        meta.textContent = (data.status === 1 ? '在线' : '离线')
+          + (data.speed_mbps ? ' · ' + data.speed_mbps + ' Mbps' : '');
+        statusEl.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+      })
+      .catch(function (err) {
+        statusEl.textContent = '加载失败：' + err.message;
+      });
+  }
+
+  sel.addEventListener('change', load);
+  document.querySelectorAll('#rangeGroup button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#rangeGroup button').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      minutes = parseInt(btn.dataset.minutes, 10);
+      load();
+    });
+  });
+  var resizeTimer = null;
+  window.addEventListener('resize', function () {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(draw, 150);
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) load();
+  });
+  setInterval(load, 30000);
+  load();
+})();
+</script>
+{% endblock %}

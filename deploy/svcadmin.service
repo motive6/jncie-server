@@ -1,0 +1,19 @@
+[Unit]
+Description=SVC Admin 管理面板
+After=network-online.target mariadb.service
+Wants=network-online.target
+Requires=mariadb.service
+
+[Service]
+Type=simple
+User=svcadmin
+Group=svcadmin
+WorkingDirectory=/opt/svcadmin
+EnvironmentFile=/etc/svcadmin/svcadmin.env
+ExecStart=/opt/svcadmin/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080 --proxy-headers
+Restart=on-failure
+RestartSec=2
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
