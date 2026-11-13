@@ -1,8 +1,19 @@
-# SVC Admin — 单机五服务托管面板
+# SVC Admin — 单机六服务托管面板
 
-在 **Ubuntu 24.04** 上用 apt 原生部署 FTP、DNS 代理、RADIUS、Syslog、SNMP 五个服务，并通过一个自研 Web 面板统一管理。不使用容器。
+SVC Admin 是一套面向中小型内网运维场景的 **Ubuntu 24.04 单机服务托管面板**。它使用 apt 原生部署 FTP、DNS 代理、RADIUS、Syslog、SNMP 和 NTP 六项服务，并通过统一的 Web 界面完成配置、状态查看、连接自测、权限控制与操作审计。整个方案不依赖容器，适合资源有限、希望快速交付且便于长期维护的服务器环境。
+
+面板将高频运维操作集中到一个入口：管理员可以在同一套页面中维护虚拟 FTP 用户、DNS 转发与本地解析、RADIUS 用户和 NAS 客户端、日志接收规则、SNMP 监控主机以及 NTP 授时策略。配置变更经过校验、备份、应用、健康检查和失败回滚，降低直接修改系统配置文件带来的风险。
 
 > 完整的架构、接口清单、数据模型、安全机制与运维说明见 [docs/开发与运维文档.md](docs/开发与运维文档.md)。
+
+## 核心功能
+
+- **六项服务统一管理**：FTP、DNS、RADIUS、Syslog、SNMP、NTP 共用一套导航、状态展示、配置表单和自测入口。
+- **可视化运行状态**：总览页实时展示 CPU、内存、磁盘、负载和网络吞吐趋势，同时汇总服务运行状态与最近操作。
+- **安全变更闭环**：配置先写入 staging，再交给 root 助手完成备份、校验、原子安装、服务重启、健康检查和失败回滚。
+- **主机与接口监控**：添加 SNMP v2c/v3 被监控主机，查看系统信息、内存、Swap、磁盘和接口流量，历史数据保留 24 小时。
+- **角色与操作审计**：管理员与只读账号权限分离，所有关键配置动作记录操作者、服务、详情和执行结果。
+- **本地 dry-run 演示**：无需修改本机系统服务即可启动完整界面，用于二次开发、截图和功能验收。
 
 | 服务 | 实现 | 面板能力 |
 |---|---|---|
@@ -12,6 +23,27 @@
 | Syslog | rsyslog → MariaDB（ommysql） | 接收网段、过滤/转发规则、检索、保留清理 |
 | SNMP | net-snmp snmpd（v2c + v3） | 团体名/来源网段/v3 用户/Trap 目标、snmpget 自测；**添加被监控主机**并每 60 秒轮询，子菜单进入详情页查看内存、磁盘、接口流量 |
 | NTP | chrony（替代 systemd-timesyncd） | 上游服务器、允许授时网段、本地层级；查看同步状态与时间源列表 |
+
+## 界面预览
+
+以下截图来自本地 `dry-run` 演示环境，使用示例数据展示实际页面布局和主要交互。部署到服务器后，页面会读取真实服务状态与数据库数据。
+
+![SVC Admin 总览仪表盘](docs/screenshots/dashboard.jpg)
+
+### 核心模块
+
+| 模块 | 功能与页面 |
+|---|---|
+| **FTP 服务**<br>全局 TLS、被动端口、连接限制、虚拟用户、配额、限速与登录自测。 | [![FTP 服务界面](docs/screenshots/ftp.jpg)](docs/screenshots/ftp.jpg) |
+| **DNS 代理**<br>上游与缓存、按域名分流、本地 A/CNAME、域名屏蔽、查询日志与解析测试。 | [![DNS 代理界面](docs/screenshots/dns.jpg)](docs/screenshots/dns.jpg) |
+| **RADIUS 服务**<br>用户、用户组、回复属性、NAS 客户端、在线会话与认证自测。 | [![RADIUS 服务界面](docs/screenshots/radius.jpg)](docs/screenshots/radius.jpg) |
+| **Syslog 服务**<br>接收网段、过滤与转发规则、日志检索、自动刷新和保留清理。 | [![Syslog 服务界面](docs/screenshots/syslog.jpg)](docs/screenshots/syslog.jpg) |
+| **SNMP 服务**<br>本机 snmpd 配置、v2c/v3 用户、Trap 目标、被监控主机列表与探测。 | [![SNMP 服务界面](docs/screenshots/snmp.jpg)](docs/screenshots/snmp.jpg) |
+| **SNMP 主机详情**<br>系统信息、内存与 Swap、磁盘使用率、接口选择、1/6/24 小时流量趋势和统计。 | [![SNMP 主机监控详情](docs/screenshots/snmp-host.jpg)](docs/screenshots/snmp-host.jpg) |
+| **NTP 服务**<br>chrony 同步状态、Stratum、参考源、时间源列表、上游配置与授时网段。 | [![NTP 服务界面](docs/screenshots/ntp.jpg)](docs/screenshots/ntp.jpg) |
+| **网络配置**<br>展示网卡、地址、路由和 DNS，支持 DHCP/静态地址以及 90 秒自动回滚。 | [![网络配置界面](docs/screenshots/network.jpg)](docs/screenshots/network.jpg) |
+| **审计日志**<br>按服务筛选配置变更，记录时间、操作者、动作、详情和结果。 | [![审计日志界面](docs/screenshots/audit.jpg)](docs/screenshots/audit.jpg) |
+| **用户管理**<br>添加账号、调整管理员/只读角色、重置密码，只读权限由服务端强制执行。 | [![用户管理界面](docs/screenshots/users.jpg)](docs/screenshots/users.jpg) |
 
 ## SNMP 主机监控
 
